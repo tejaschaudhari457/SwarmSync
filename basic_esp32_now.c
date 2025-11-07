@@ -1,68 +1,72 @@
-#include <esp_now.h>
+DEVICE A 
+
+// Stage2_sender_leds.ino  (Device A)
 #include <WiFi.h>
+#include <esp_now.h>
 
-typedef struct message {
-  int senderID;         // 0 = Device A
-  char msgType[20];     // "STATUS_OK", "HELP_REQUEST", etc.
-  float posX;
-  float posY;
-} message;
+int ledPins[] = {12,13,14,15,16,17,18,19};
+const int numLEDs = 8; int ledIndex = 0;
+uint8_t peerAddress[] = {0xCC,0xDB,0xA7,0x9D,0x73,0xA8}; // Device B MAC
+int myID = 0;
+typedef struct { int senderID; int counter; } msg_t;
+msg_t m;
 
-message incoming, outgoing;
-
-// -------- Device A Settings --------
-uint8_t peerAddress[] = {0xCC, 0xDB, 0xA7, 0x9D, 0x73, 0xA8};  // Device B MAC
-int myID = 0;  // Device A ID
-
-bool isStuck = false;
-unsigned long lastStatusTime = 0;
-
-// === Receive Callback ===
-void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
-  memcpy(&incoming, data, sizeof(incoming));
-  Serial.printf("\n📩 From Robot %d: %s\n", incoming.senderID, incoming.msgType);
-
-  if (strcmp(incoming.msgType, "HELP_ACK") == 0) {
-    Serial.println("🤝 Helper acknowledged. Waiting...");
+void onDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status){
+  if(status == ESP_NOW_SEND_SUCCESS){
+    digitalWrite(ledPins[ledIndex], !digitalRead(ledPins[ledIndex]));
+    ledIndex = (ledIndex + 1) % numLEDs;
   }
-  if (strcmp(incoming.msgType, "HELP_DONE") == 0) {
-    Serial.println("🏁 Help completed. Resuming task.");
-    isStuck = false;
-  }
+  Serial.printf("send status: %s\n", status==ESP_NOW_SEND_SUCCESS?"OK":"FAIL");
 }
 
-void setup() {
+void setup(){
   Serial.begin(115200);
-  WiFi.mode(WIFI_STA);
-  Serial.print("My MAC: "); Serial.println(WiFi.macAddress());
+  WiFi.mode(WIFI_STA); Serial.println(WiFi.macAddress());
+  for(int i=0;i<numLEDs;i++){ pinMode(ledPins[i], OUTPUT); digitalWrite(ledPins[i], LOW); }
+  if(esp_now_init()!=ESP_OK){Serial.println("esp_now fail"); while(1) delay(1000);}
+  esp_now_register_send_cb(onDataSent);
+  esp_now_peer_info_t p={}; memcpy(p.peer_addr, peerAddress, 6); p.channel=0; p.encrypt=false;
+  esp_now_add_peer(&p);
+  m.senderID=myID;
+}
 
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW init failed!"); while (true) delay(1000);
-  }
-  esp_now_add_peer(peerAddress, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
+void loop(){
+  static int c=0; m.counter=c++;
+  esp_err_t r = esp_now_send(peerAddress, (uint8_t*)&m, sizeof(m));
+  Serial.printf("sent %d -> %d\n", m.counter, r);
+  delay(2000);
+}
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+  --------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+  DEVICE B
+
+  // Stage2_receiver_leds.ino  (Device B)
+#include <WiFi.h>
+#include <esp_now.h>
+
+int ledPins[] = {12,13,14,15,16,17,18,19};
+const int numLEDs = 8; int ledIndex=0;
+uint8_t peerAddress[] = {0xCC,0xDB,0xA7,0x97,0x7E,0xDC}; // Device A MAC
+typedef struct { int senderID; int counter; } msg_t; msg_t in;
+
+void onReceive(const esp_now_recv_info *info, const uint8_t *data, int len){
+  memcpy(&in, data, sizeof(in));
+  Serial.printf("RX from %d : %d\n", in.senderID, in.counter);
+  digitalWrite(ledPins[ledIndex], !digitalRead(ledPins[ledIndex]));
+  ledIndex = (ledIndex + 1) % numLEDs;
+}
+
+void setup(){
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA); Serial.println(WiFi.macAddress());
+  for(int i=0;i<numLEDs;i++){ pinMode(ledPins[i], OUTPUT); digitalWrite(ledPins[i], LOW); }
+  if(esp_now_init()!=ESP_OK){Serial.println("esp_now fail"); while(1) delay(1000);}
+  esp_now_peer_info_t p={}; memcpy(p.peer_addr, peerAddress, 6); p.channel=0; p.encrypt=false;
+  esp_now_add_peer(&p);
   esp_now_register_recv_cb(onReceive);
-
-  outgoing.senderID = myID;
-  outgoing.posX = 0;
-  outgoing.posY = 0;
 }
 
-void loop() {
-  unsigned long now = millis();
+void loop(){ delay(100); }
 
-  // Periodic STATUS
-  if (now - lastStatusTime > 3000 && !isStuck) {
-    lastStatusTime = now;
-    strcpy(outgoing.msgType, "STATUS_OK");
-    esp_now_send(peerAddress, (uint8_t*)&outgoing, sizeof(outgoing));
-    Serial.println("📡 STATUS_OK sent.");
-  }
-
-  // Simulated stuck event after 15 s
-  if (!isStuck && now > 15000) {
-    Serial.println("🚨 Robot stuck! Sending HELP_REQUEST...");
-    strcpy(outgoing.msgType, "HELP_REQUEST");
-    esp_now_send(peerAddress, (uint8_t*)&outgoing, sizeof(outgoing));
-    isStuck = true;
-  }
-}
